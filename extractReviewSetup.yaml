@@ -1,0 +1,108 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Deploy review extraction on AWS Fargate.
+
+Parameters:
+  MongoDBUser:
+    Type: String
+    Description: The username for MongoDB.
+
+Resources:
+  ECRRepository:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: <add-your-ecr-repo-here>
+
+  ExecutionRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: 'sts:AssumeRole'
+      Policies:
+        - PolicyName: AccessECR
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'ecr:GetDownloadUrlForLayer'
+                  - 'ecr:BatchGetImage'
+                  - 'ecr:BatchCheckLayerAvailability'
+                Resource: !GetAtt ECRRepository.Arn
+        - PolicyName: AccessSecrets
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'secretsmanager:GetSecretValue'
+                Resource: !Ref MongoDBPassword
+
+  MongoDBPassword:
+    Type: AWS::SecretsManager::Secret
+    Properties: 
+      Name: MongoDBPassword
+      Description: Password for MongoDB
+      GenerateSecretString:
+        SecretStringTemplate: '{"username": "admin"}'
+        GenerateStringKey: "password"
+        PasswordLength: 30
+        ExcludeCharacters: '"@/\'
+
+  FargateCluster:
+    Type: AWS::ECS::Cluster
+
+  FargateTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: MyScheduledTask
+      Cpu: 256
+      Memory: 512
+      NetworkMode: awsvpc
+      RequiresCompatibilities:
+        - FARGATE
+      ExecutionRoleArn: !GetAtt ExecutionRole.Arn
+      TaskRoleArn: !GetAtt ExecutionRole.Arn
+      ContainerDefinitions:
+        - Name: MyContainer
+          Image: !Sub "${ECRRepository.RepositoryUri}:latest"
+          Environment:
+            - Name: MONGODB_USR
+              Value: !Ref MongoDBUser
+          Secrets:
+            - Name: MONGODB_PWD
+              ValueFrom: !Ref MongoDBPassword
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref CloudWatchLogGroup
+              awslogs-region: !Ref "AWS::Region"
+              awslogs-stream-prefix: ecs
+
+  CloudWatchLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/ecs/${FargateTaskDefinition.Family}"
+
+  ScheduledRule:
+    Type: AWS::Events::Rule
+    Properties:
+      ScheduleExpression: 'cron(0 9 * * ? *)'
+      Targets:
+        - Id: FargateScheduledTask
+          Arn: !GetAtt FargateCluster.Arn
+          RoleArn: !GetAtt ExecutionRole.Arn
+          EcsParameters:
+            TaskCount: 1
+            TaskDefinitionArn: !Ref FargateTaskDefinition
+            LaunchType: FARGATE
+            NetworkConfiguration:
+              awsvpcConfiguration:
+                Subnets: 
+                  - your-first-subnet
+                  - your-second-subnet
+                AssignPublicIp: ENABLED
